@@ -19,9 +19,9 @@
 #define SR1_SRCLK  4
 
 // Motor 1
-#define M1_STEP    22
-#define M1_DIR     23
-#define M1_EN_BIT  0    // Q0 of SR1  (Q1 → 1, Q2 → 2, etc.)
+#define M1_STEP    28
+#define M1_DIR     29
+#define M1_EN_BIT  3// Q0 of SR1  (Q1 → 1, Q2 → 2, etc.)
 
 // ── Adding more hardware looks like this: ────────────────────────
 // #define SR2_SER    5
@@ -106,6 +106,29 @@ void initMotorPins(byte dirPin, byte stepPin) {
   digitalWrite(stepPin, LOW);
 }
 
+void handleSerial() {
+  if (!Serial.available()) return;
+
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+  if (line.length() == 0) return;
+
+  int steps = line.toInt();
+  if (steps == 0) {
+    Serial.println("! Enter a non-zero step count, e.g. 1000 or -1000");
+    return;
+  }
+
+  Serial.print("M1 moving "); Serial.print(steps); Serial.println(" steps");
+
+  enableMotor(SR1_SER, SR1_RCLK, SR1_SRCLK, sr1, M1_EN_BIT, true);
+  delay(5);
+
+  stepMotor(M1_DIR, M1_STEP, steps);   // sign controls direction
+
+  enableMotor(SR1_SER, SR1_RCLK, SR1_SRCLK, sr1, M1_EN_BIT, false);
+  Serial.println("Done.");
+}
 
 // ── Setup & Loop ─────────────────────────────────────────────────
 
@@ -123,17 +146,18 @@ void setup() {
   delay(100);
 
   // ── Example motion ───────────────────────────────────────────
-  enableMotor(SR1_SER, SR1_RCLK, SR1_SRCLK, sr1, M1_EN_BIT, true);
+  //enableMotor(SR1_SER, SR1_RCLK, SR1_SRCLK, sr1, M1_EN_BIT, true);
 
 
-  Serial.println("200 steps CCW, 1/16 microstepping");
-  stepMotor(M1_DIR, M1_STEP, -200, 32, 200);
-  delay(300);
+  //Serial.println("200 steps CCW, 1/16 microstepping");
+  //stepMotor(M1_DIR, M1_STEP, -200, 32, 200);
+  //delay(300);
 
-  enableMotor(SR1_SER, SR1_RCLK, SR1_SRCLK, sr1, M1_EN_BIT, false);
-  Serial.println("Done. Motor disabled.");
+  //enableMotor(SR1_SER, SR1_RCLK, SR1_SRCLK, sr1, M1_EN_BIT, false);
+ // Serial.println("Done. Motor disabled.");
 }
 
 void loop() {
   // your control logic here
+  handleSerial();
 }

@@ -3,12 +3,26 @@
 Servo bigServo;
 
 void setup() {
+  Serial.begin(9600);
   bigServo.attach(14, 500, 2500);
+  //bigServo.write(0);
+  Serial.println("Enter angle (0-180):");
 }
 
 void loop() {
-  bigServo.writeMicroseconds(500);   // 0°
-  delay(2000);
-  bigServo.writeMicroseconds(2089);  // ~170°
-  delay(2000);
+  if (Serial.available() > 0) {
+    int angle = Serial.parseInt();
+
+    if (angle >= 0 && angle <= 180) {
+      bigServo.write(angle);
+      Serial.print("Moving to ");
+      Serial.print(angle);
+      Serial.println("°");
+    } else {
+      Serial.println("Out of range (0-180)");
+    }
+
+    // flush leftover characters (newline, etc.)
+    while (Serial.available() > 0) Serial.read();
+  }
 }
