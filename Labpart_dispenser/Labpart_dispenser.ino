@@ -9,7 +9,14 @@
 //
 //  Shift registers:
 //    SR_RC   (5/6/7)  -> 6 resistor+capacitor motor enable bits (0..5)
-//    SR_WIRE (2/3/4)  -> 5 wire-cutter motor enable bits (M1..M5)
+//    SR_WIRE (2/3/4)  -> 5 wire-cutter enable bits (M1..M5, bits 0..4)
+//                        + packing-system motor enable (bit 5)
+//
+//  Packing system:
+//    On DISPENSE, the carousel homes, then advances one slot per kit.
+//    For each slot it dispenses that kit's selected parts. The packing
+//    motor stays energized for the whole run and is released only when
+//    every kit is dispensed. # of Kits (1..10) = slots to fill.
 //
 //  UI mapping:
 //    Dispense page:  each +/- box sets a per-slot quantity.
@@ -204,11 +211,52 @@ WireCutter wire[3] = {
 int swLastState = HIGH;
 
 // =================================================================
+//  PACKING SYSTEM (carousel)  — DRV8825 on SRW enable bit 5
+// =================================================================
+//  Shares the wire-cutter shift register (SRW, pins 2/3/4).
+//  SRW enable bits: 0..4 = wire cutters (M1..M5), 5 = packing motor.
+//  Its own STEP/DIR pins and a limit switch for homing.
+#define PACK_STEP        32
+#define PACK_DIR         33
+#define PACK_EN_BIT      5          // bit 5 on SRW
+#define PACK_LIMIT_PIN   0         // limit switch (normally-closed, reads LOW at home)
+
+#define PACK_STEP_MODE      32
+#define PACK_STEP_DELAY_US  1600
+#define PACK_HOME_TIMEOUT   200000  // max microsteps before giving up
+#define PACK_HOME_DIR       -1      // negative = reverse toward switch
+#define PACK_SLOT_DIR        1      // direction to advance through slots
+#define PACK_SLOT1_OFFSET    14     // steps from home to slot 1
+#define PACK_SLOT_PITCH      20     // steps between consecutive slots
+
+int packCurrentSlot = 0;           // 0 = unknown / not homed
+
+// =================================================================
+//  DOOR SENSORS (Left / Right)
+// =================================================================
+#define DOOR_LEFT_PIN   12
+#define DOOR_RIGHT_PIN  13
+// Reed/magnetic switches to GND, using the internal pull-up:
+//   LOW  = magnet present -> door CLOSED
+//   HIGH = magnet absent  -> door OPEN
+// If your switches are wired the opposite way, just flip the
+// comparison inside readDoorOpen() below.
+
+enum DoorState { DOOR_CLOSED, DOOR_OPEN };
+DoorState leftDoorState  = DOOR_CLOSED;
+DoorState rightDoorState = DOOR_CLOSED;
+
+bool readDoorOpen(byte pin) {
+  return digitalRead(pin) == HIGH;
+}
+
+// =================================================================
 //  UI STATE
 // =================================================================
 enum Page { PAGE_DISPENSE, PAGE_RELOAD };
 Page currentPage = PAGE_DISPENSE;
 bool popupVisible = false;
+bool dispensing = false;   // true while the full-screen "Dispensing in progress..." popup is up
 
 // Sensor polling keeps the LOAD page synchronized with the physical sensors.
 // A Schmitt trigger is already used for noise immunity; this interval limits
@@ -280,34 +328,53 @@ const int LABEL_H = 34;
 const int LABEL_TO_BUTTON_OFFSET = 36;
 
 const int kitPanelX = 560;
-const int kitPanelY = 70;
-const int kitPanelW = 220;
+const int kitPanelW = 230;
 const int kitPanelH = 125;
 const int KIT_BTN_W = 45;
 const int KIT_BTN_H = BTN_H;
 const int kitMinusX = kitPanelX + (kitPanelW - (KIT_BTN_W + GAP + QTY_W + GAP + KIT_BTN_W)) / 2;
 const int kitQtyX   = kitMinusX + KIT_BTN_W + GAP;
 const int kitPlusX  = kitQtyX + QTY_W + GAP;
-const int kitButtonY = 130;
 
 const int dispenseBtnX = 560;
-const int dispenseBtnY = 210;
 const int dispenseBtnW = 230;
-const int dispenseBtnH = 200;
+const int dispenseBtnH = 110;   // reduced to make room for the door status boxes below
+
+const int doorBoxW      = (dispenseBtnW - GAP) / 2;
+const int doorBoxH      = 70;
+const int leftDoorBoxX  = dispenseBtnX;
+const int rightDoorBoxX = dispenseBtnX + doorBoxW + GAP;
 
 const int RELOAD_BTN_W = BTN_W + GAP + QTY_W + GAP + BTN_W;
 const int RELOAD_BTN_H = 50;
 
 const int reloadAllBtnX = dispenseBtnX;
-const int reloadAllBtnY = dispenseBtnY;
 const int reloadAllBtnW = dispenseBtnW;
-const int reloadAllBtnH = dispenseBtnH;
+const int reloadAllBtnH = 200;   // Load page button keeps its original full size
+
+// Right-column vertical centering: on the Dispense page, the kit panel +
+// DISPENSE button + door boxes are stacked and centered as one group in
+// the space below the tab bar; on the Load page, the wire-status legend +
+// Load-all button are centered the same way, as its own (differently
+// sized) group.
+const int RIGHT_COL_GAP = 15;   // vertical gap between stacked right-column blocks
+
+const int dispenseGroupH = kitPanelH + RIGHT_COL_GAP + dispenseBtnH + RIGHT_COL_GAP + doorBoxH;
+const int dispenseGroupY = TAB_H + ((SCREEN_HEIGHT - TAB_H) - dispenseGroupH) / 2;
+const int kitPanelY   = dispenseGroupY;
+const int kitButtonY  = kitPanelY + 60;   // +/- row stays in the same spot relative to panel top
+const int dispenseBtnY = kitPanelY + kitPanelH + RIGHT_COL_GAP;
+const int doorBoxY     = dispenseBtnY + dispenseBtnH + RIGHT_COL_GAP;
+
+const int reloadGroupH  = kitPanelH + RIGHT_COL_GAP + reloadAllBtnH;
+const int reloadGroupY  = TAB_H + ((SCREEN_HEIGHT - TAB_H) - reloadGroupH) / 2;
+const int legendY       = reloadGroupY;
+const int reloadAllBtnY = legendY + kitPanelH + RIGHT_COL_GAP;
 
 const int WIRE_DOT_RADIUS = 6;
 const int WIRE_DOT_MARGIN = 10;
 
 const int legendX = kitPanelX;
-const int legendY = kitPanelY;
 const int legendW = kitPanelW;
 const int legendH = kitPanelH;
 const int legendDotX  = legendX + 24;
@@ -341,6 +408,7 @@ bool pointInRect(int px, int py, int x, int y, int w, int h) {
 void drawQuantityBox(int x, int y, int w, int h, int value);
 void drawReloadButton(int i);
 void drawInterface();
+void drawDoorBox(int x, int y, int w, int h, const char* label, DoorState state);
 
 void redrawQuantity(int index) {
   drawQuantityBox(partQtyX(index), partButtonY(index) - 3, QTY_W, GRID_QTY_H, quantities[index]);
@@ -399,6 +467,56 @@ bool schmitt(byte pin, bool& state, int hi, int lo) {
   if (state) { if (v < lo) state = false; }
   else       { if (v > hi) state = true;  }
   return state;
+}
+
+// =================================================================
+//  PACKING SYSTEM LOGIC
+// =================================================================
+// active-LOW enable on SRW bit 5
+void packEnable(bool enable) {
+  enW(PACK_EN_BIT, enable);
+}
+
+// Home: move in PACK_HOME_DIR until limit switch reads LOW.
+// Leaves the motor ENERGIZED (caller is responsible for disabling).
+bool packHome() {
+  packEnable(true);
+  delay(5);
+
+  // already home?
+  if (digitalRead(PACK_LIMIT_PIN) == LOW) {
+    packCurrentSlot = 0;
+    return true;
+  }
+
+  digitalWrite(PACK_DIR, PACK_HOME_DIR >= 0 ? HIGH : LOW);
+  long pulses = 0;
+  bool ok = true;
+  while (digitalRead(PACK_LIMIT_PIN) == HIGH) {
+    pulseStep(PACK_STEP, PACK_STEP_DELAY_US);
+    if (++pulses > PACK_HOME_TIMEOUT) { ok = false; break; }
+  }
+  packCurrentSlot = 0;
+  return ok;
+}
+
+// Advance a magnitude of steps in PACK_SLOT_DIR (stays energized).
+void packStep(long steps) {
+  digitalWrite(PACK_DIR, PACK_SLOT_DIR >= 0 ? HIGH : LOW);
+  long count = labs(steps) * PACK_STEP_MODE;
+  for (long i = 0; i < count; i++) pulseStep(PACK_STEP, PACK_STEP_DELAY_US);
+}
+
+// Move to slot 1..10. Slot 1 = SLOT1_OFFSET from home; each further slot
+// is one PITCH from the previous. Assumes packHome() already ran and the
+// motor is energized. Incremental from packCurrentSlot.
+void packMoveToSlot(int slot) {
+  if (slot == 1) {
+    packStep(PACK_SLOT1_OFFSET);
+  } else {
+    packStep(PACK_SLOT_PITCH);
+  }
+  packCurrentSlot = slot;
 }
 
 // =================================================================
@@ -648,6 +766,20 @@ void updateLoadStatusFromSensors() {
   if (now - lastPollMs < SENSOR_STATUS_POLL_MS) return;
   lastPollMs = now;
 
+  // Door sensors - keep the Dispense page boxes live
+  DoorState newLeft  = readDoorOpen(DOOR_LEFT_PIN)  ? DOOR_OPEN : DOOR_CLOSED;
+  DoorState newRight = readDoorOpen(DOOR_RIGHT_PIN) ? DOOR_OPEN : DOOR_CLOSED;
+  bool leftDoorChanged  = (newLeft  != leftDoorState);
+  bool rightDoorChanged = (newRight != rightDoorState);
+  leftDoorState  = newLeft;
+  rightDoorState = newRight;
+  if (currentPage == PAGE_DISPENSE && !popupVisible) {
+    if (leftDoorChanged)
+      drawDoorBox(leftDoorBoxX, doorBoxY, doorBoxW, doorBoxH, "L Door", leftDoorState);
+    if (rightDoorChanged)
+      drawDoorBox(rightDoorBoxX, doorBoxY, doorBoxW, doorBoxH, "R Door", rightDoorState);
+  }
+
   for (int s = 0; s < 3; s++) {
     // Capacitor sensor -> part indexes 3..5
     int capIndex = 3 + s;
@@ -721,17 +853,51 @@ void loadResistorsAndCapacitors() {
   }
 }
 
-// Dispense everything selected on the Dispense page.
-void runDispense() {
+// Resistor/capacitor slots must be LOADED to dispense; wire slots aren't
+// gated by dispenserFlag. Returns false if any selected (quantity > 0)
+// resistor/capacitor slot is EMPTY or in the REMOVE (unable to load) state.
+bool selectedDispensersReady() {
   for (int i = 0; i < NUM_PARTS; i++) {
     if (quantities[i] <= 0) continue;
-    int total = quantities[i] * numKits;
-    if (total <= 0) continue;
-    int s = slotOf(i);
-    if (partType[i] == TYPE_CAPACITOR)      capDispense(s, total);
-    else if (partType[i] == TYPE_RESISTOR)  resDispense(s, total);
-    else if (partType[i] == TYPE_WIRE)      wireDispense(s, (float)total); // total cm
+    if (partType[i] == TYPE_WIRE) continue;
+    if (dispenserFlag[i] != FLAG_LOADED) return false;
   }
+  return true;
+}
+
+// Dispense one kit's worth of every selected part into the current slot.
+// quantities[i] is the per-kit amount for that part.
+void dispenseOneKit() {
+  for (int i = 0; i < NUM_PARTS; i++) {
+    int qty = quantities[i];
+    if (qty <= 0) continue;
+    int s = slotOf(i);
+    if (partType[i] == TYPE_CAPACITOR)      capDispense(s, qty);
+    else if (partType[i] == TYPE_RESISTOR)  resDispense(s, qty);
+    else if (partType[i] == TYPE_WIRE)      wireDispense(s, (float)qty); // cm per kit
+  }
+}
+
+// Full run: home the packing carousel, then for each kit move to the next
+// slot and dispense that kit's parts. The packing motor stays ENERGIZED
+// for the entire run and is only released once every kit is dispensed.
+//
+// numKits = number of packing slots to fill (1..10).
+void runDispense() {
+  // 1) Home the packing system first (motor energized on SRW bit 5).
+  if (!packHome()) {
+    packEnable(false);   // release on failure
+    return;
+  }
+
+  // 2) One kit per slot: move to slot N, dispense kit N.
+  for (int kit = 1; kit <= numKits; kit++) {
+    packMoveToSlot(kit);   // slot 1 = home+offset, then +pitch each time
+    dispenseOneKit();      // packing motor held energized throughout
+  }
+
+  // 3) All kits done — now it is safe to release the packing motor.
+  packEnable(false);
 }
 
 // =================================================================
@@ -791,6 +957,17 @@ void drawButtonTwoLine(int x, int y, int w, int h, uint16_t fillColor,
   drawCenteredText(x, startY + lineHeight + lineGap, w, lineHeight, line2, textColor, fillColor, size);
 }
 
+void drawDoorBox(int x, int y, int w, int h, const char* label, DoorState state) {
+  uint16_t fillColor = (state == DOOR_OPEN) ? COLOR_RED : COLOR_GREEN;
+  const char* stateText = (state == DOOR_OPEN) ? "OPEN" : "CLOSED";
+  drawButtonTwoLine(x, y, w, h, fillColor, RA8875_WHITE, label, stateText, 1);
+}
+
+void drawDoorBoxes() {
+  drawDoorBox(leftDoorBoxX,  doorBoxY, doorBoxW, doorBoxH, "L Door",  leftDoorState);
+  drawDoorBox(rightDoorBoxX, doorBoxY, doorBoxW, doorBoxH, "R Door", rightDoorState);
+}
+
 void drawQuantityBox(int x, int y, int w, int h, int value) {
   char buffer[6];
   sprintf(buffer, "%d", value);
@@ -827,6 +1004,7 @@ void drawDispensePage() {
   drawQuantityBox(kitQtyX, kitButtonY, QTY_W, GRID_QTY_H, numKits);
   drawButton(kitPlusX, kitButtonY, KIT_BTN_W, KIT_BTN_H, COLOR_PLUS, RA8875_WHITE, "+");
   drawButton(dispenseBtnX, dispenseBtnY, dispenseBtnW, dispenseBtnH, COLOR_PLUS, RA8875_WHITE, "DISPENSE");
+  drawDoorBoxes();
 }
 
 // Draw just one reload slot (label, wire dot if applicable, and its button).
@@ -848,11 +1026,11 @@ void drawReloadButton(int i) {
   }
 
   uint16_t fillColor = COLOR_PLUS;
-  const char* label = "Load";
+  const char* label = "LOAD";
   uint8_t labelSize = 1;
   if (partType[i] != TYPE_WIRE) {
     switch (dispenserFlag[i]) {
-      case FLAG_EMPTY:  fillColor = COLOR_PLUS;   label = "Load";         labelSize = 1; break;
+      case FLAG_EMPTY:  fillColor = COLOR_PLUS;   label = "LOAD";         labelSize = 1; break;
       case FLAG_LOADED: fillColor = COLOR_LOADED; label = "LOADED";       labelSize = 1; break;
       case FLAG_REMOVE: fillColor = COLOR_RED;    label = "UNABLE TO LOAD"; labelSize = 0; break;
     }
@@ -875,7 +1053,7 @@ void drawReloadPage() {
   drawLeftText(legendTextX, legendRow2Y, "Empty", RA8875_WHITE, RA8875_DARKGREY, 1);
 
   drawButtonTwoLine(reloadAllBtnX, reloadAllBtnY, reloadAllBtnW, reloadAllBtnH,
-                    COLOR_PLUS, RA8875_WHITE, "Load Resistors", "and Capacitors", 1);
+                    COLOR_PLUS, RA8875_WHITE, "LOAD RESISTORS", "AND CAPACITORS", 1);
 }
 
 void drawInterface() {
@@ -883,6 +1061,19 @@ void drawInterface() {
   drawTabBar();
   if (currentPage == PAGE_DISPENSE) drawDispensePage();
   else                              drawReloadPage();
+}
+
+// Non-closeable popup shown while runDispense() is running, same size/position
+// as the warning popup box (overlays the menu rather than covering the whole
+// screen). It has no close button; since runDispense() blocks the loop() call
+// that invoked it, the touch handler never runs again until dispensing is
+// finished, so no touches can reach any control while this is up.
+void showDispensingPopup() {
+  dispensing = true;
+  tft.fillRect(popupX, popupY, POPUP_W, POPUP_H, RA8875_WHITE);
+  tft.drawRect(popupX, popupY, POPUP_W, POPUP_H, RA8875_BLACK);
+  drawCenteredText(popupX + 10, popupY + 10, POPUP_W - 20, POPUP_H - 20,
+                    "Dispensing in progress...", RA8875_BLACK, RA8875_WHITE, 1);
 }
 
 void showWarningPopup(const char* message) {
@@ -934,6 +1125,19 @@ void setup() {
   }
   pinMode(SW_PIN, INPUT_PULLUP);
   swLastState = digitalRead(SW_PIN);
+
+  //Wire guillotine aligns  
+  homeM1M2();
+
+  // Packing system motor + limit switch (enable is on SRW bit 5)
+  initMotorPins(PACK_DIR, PACK_STEP);
+  pinMode(PACK_LIMIT_PIN, INPUT_PULLUP);
+
+  // Door sensors
+  pinMode(DOOR_LEFT_PIN, INPUT_PULLUP);
+  pinMode(DOOR_RIGHT_PIN, INPUT_PULLUP);
+  leftDoorState  = readDoorOpen(DOOR_LEFT_PIN)  ? DOOR_OPEN : DOOR_CLOSED;
+  rightDoorState = readDoorOpen(DOOR_RIGHT_PIN) ? DOOR_OPEN : DOOR_CLOSED;
 
   // PCA9685 (resistor cutters)
   i2cRecover();
@@ -988,6 +1192,8 @@ void handleSwitch() {
 }
 
 void loop() {
+  if (dispensing) return;   // belt-and-suspenders: block all touch handling while dispensing
+
   handleSwitch();
   updateLoadStatusFromSensors();
 
@@ -1073,11 +1279,16 @@ void loop() {
 
   // DISPENSE
   if (pointInRect(x, y, dispenseBtnX, dispenseBtnY, dispenseBtnW, dispenseBtnH)) {
+    if (leftDoorState == DOOR_OPEN || rightDoorState == DOOR_OPEN) { showWarningPopup("Doors are open!"); return; }
     if (numKits <= 0) { showWarningPopup("Set # of Kits first"); return; }
+    if (!selectedDispensersReady()) { showWarningPopup("Selected part not loaded"); return; }
+    showDispensingPopup();
     runDispense();
+    dispensing = false;
     // Ignore the touch that is still held after the (long) batch:
     while (tft.touched()) { tft.touchRead(&rawX, &rawY); }  // wait for release
     lastTouchTime = millis();                                // reset debounce
+    showWarningPopup("Dispensing complete!");
     return;
   }
 }
