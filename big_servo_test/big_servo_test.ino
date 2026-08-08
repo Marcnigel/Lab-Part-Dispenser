@@ -4,7 +4,7 @@ Servo bigServo;
 
 void setup() {
   Serial.begin(9600);
-  bigServo.attach(14, 500, 2500);
+  bigServo.attach(16, 500, 2500);
   //bigServo.write(0);
   Serial.println("Enter angle (0-180):");
 }

@@ -19,9 +19,9 @@
 #define SR1_SRCLK  7
 
 // Motor 1
-#define M1_STEP    48
-#define M1_DIR     49
-#define M1_EN_BIT  5// Q0 of SR1  (Q1 → 1, Q2 → 2, etc.)
+#define M1_STEP  48
+#define M1_DIR   49 
+#define M1_EN_BIT  5 // Q0 of SR1  (Q1 → 1, Q2 → 2, etc.)
 
 // ── Adding more hardware looks like this: ────────────────────────
 // #define SR2_SER    5
