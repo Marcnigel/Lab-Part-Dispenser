@@ -98,7 +98,7 @@ byte srW = 0xFF;
 #define CAP_LOAD_DIR 1
 #define CAP_LOAD_DELAY_US 100
 #define CAP_LOAD_TIMEOUT 20000
-#define CAP_MAX_PER_CUT 2
+#define CAP_MAX_PER_CUT 1
 #define CAP_ADVANCE_STEPS 600  // advance past sensor before cutting
 
 #define CUT_REST_ANGLE 80
@@ -136,10 +136,10 @@ CapDispenser cap[3] = {
 #define PCA_ADDR 0x40
 #define SERVO_MIN 150
 #define SERVO_MAX 600
-#define RCUT_A_REST 90
+#define RCUT_A_REST 88
 #define RCUT_A_CUT 0
-#define RCUT_B_REST 0
-#define RCUT_B_CUT 100
+#define RCUT_B_REST 10
+#define RCUT_B_CUT 98
 #define RCUT_TRAVEL_MS 400
 #define RCUT_HOLD_MS 300
 #define SDA_PIN 20
@@ -747,6 +747,7 @@ int resDispense(int s, int qty) {
     }
     stepMotor(d.dirPin, d.stepPin, -RES_BACKOFF_STEPS, 1, RES_FEED_DELAY_US);
     enRC(d.enBit, false);
+    delay(500);
     if (dispensed > 0) resCut(s);
     totalDispensed += dispensed;
     remaining -= dispensed;
@@ -1051,6 +1052,7 @@ DispenseResult runDispense() {
 
     // Slot fully dispensed.
     result.slotsCompleted = kit;
+    delay(1000);
   }
 
   // 3) Run finished (or aborted) — release the packing motor.
