@@ -18,6 +18,14 @@
 //    motor stays energized for the whole run and is released only when
 //    every kit is dispensed. # of Kits (1..10) = slots to fill.
 //
+//  Mid-run aborts:
+//    * If a resistor/capacitor dispenser runs out (a feed fails ->
+//      FLAG_REMOVE), the whole run stops immediately. The popup reports
+//      how many slots were completed and which dispenser ran empty.
+//    * If either door opens mid-run, the run stops immediately and the
+//      popup reports how many slots were completed. Doors are checked
+//      before each kit and before each part within a kit.
+//
 //  UI mapping:
 //    Dispense page:  each +/- box sets a per-slot quantity.
 //        Resistor 1..3 / Capacitor 1..3 -> count  (x numKits)
@@ -251,6 +259,33 @@ bool readDoorOpen(byte pin) {
   return digitalRead(pin) == HIGH;
 }
 
+// True if either door is physically open right now (live read, not cached).
+bool anyDoorOpenNow() {
+  return readDoorOpen(DOOR_LEFT_PIN) || readDoorOpen(DOOR_RIGHT_PIN);
+}
+
+// =================================================================
+//  DISPENSE ABORT SIGNALLING
+// =================================================================
+// Result of a dispense run so the UI can report exactly what happened.
+enum AbortReason { ABORT_NONE,       // finished all kits
+                   ABORT_EMPTY,      // an R/C dispenser ran out of parts
+                   ABORT_DOOR };     // a door was opened mid-run
+
+struct DispenseResult {
+  AbortReason reason;
+  int slotsCompleted;  // number of fully dispensed slots/kits
+  int emptyPartIndex;  // part index that ran empty (valid when ABORT_EMPTY)
+};
+
+// Explicit prototypes for functions that take/return DispenseResult.
+// Declared here (after the struct) so the Arduino IDE's auto-prototype
+// generator doesn't emit its own prototype ABOVE this struct, which would
+// fail with "'DispenseResult' does not name a type".
+bool dispenseOneKit(DispenseResult& out);
+DispenseResult runDispense();
+void showDispenseResultPopup(const DispenseResult& r);
+
 // =================================================================
 //  UI STATE
 // =================================================================
@@ -389,7 +424,7 @@ const int legendRow1Y = legendY + 50;
 const int legendRow2Y = legendY + 95;
 const int legendTextX = legendDotX + 18;
 
-const int POPUP_W = 420;
+const int POPUP_W = 440;
 const int POPUP_H = 200;
 const int popupX = (SCREEN_WIDTH - POPUP_W) / 2;
 const int popupY = (SCREEN_HEIGHT - POPUP_H) / 2;
@@ -930,37 +965,97 @@ bool selectedDispensersReady() {
 
 // Dispense one kit's worth of every selected part into the current slot.
 // quantities[i] is the per-kit amount for that part.
-void dispenseOneKit() {
+//
+// Aborts partway if a door opens or a resistor/capacitor dispenser runs
+// out of parts. On abort, `out` carries the reason (and, for ABORT_EMPTY,
+// the part index that ran empty) and dispensing stops immediately.
+// Returns true if the whole kit dispensed, false if it aborted.
+bool dispenseOneKit(DispenseResult& out) {
   for (int i = 0; i < NUM_PARTS; i++) {
     int qty = quantities[i];
     if (qty <= 0) continue;
+
+    // Door check before starting each part.
+    if (anyDoorOpenNow()) {
+      out.reason = ABORT_DOOR;
+      return false;
+    }
+
     int s = slotOf(i);
-    if (partType[i] == TYPE_CAPACITOR) capDispense(s, qty);
-    else if (partType[i] == TYPE_RESISTOR) resDispense(s, qty);
-    else if (partType[i] == TYPE_WIRE) wireDispense(s, (float)qty);  // cm per kit
+    if (partType[i] == TYPE_CAPACITOR) {
+      int got = capDispense(s, qty);
+      // A short feed or a REMOVE flag means the dispenser ran out.
+      if (got < qty || dispenserFlag[i] == FLAG_REMOVE) {
+        out.reason = ABORT_EMPTY;
+        out.emptyPartIndex = i;
+        return false;
+      }
+    } else if (partType[i] == TYPE_RESISTOR) {
+      int got = resDispense(s, qty);
+      if (got < qty || dispenserFlag[i] == FLAG_REMOVE) {
+        out.reason = ABORT_EMPTY;
+        out.emptyPartIndex = i;
+        return false;
+      }
+    } else if (partType[i] == TYPE_WIRE) {
+      wireDispense(s, (float)qty);  // cm per kit
+    }
   }
+  return true;
 }
 
 // Full run: home the packing carousel, then for each kit move to the next
 // slot and dispense that kit's parts. The packing motor stays ENERGIZED
-// for the entire run and is only released once every kit is dispensed.
+// for the entire run and is only released once every kit is dispensed OR
+// the run aborts (empty dispenser / open door).
 //
 // numKits = number of packing slots to fill (1..10).
-void runDispense() {
+//
+// Returns a DispenseResult describing how many slots were completed and,
+// if it stopped early, why.
+DispenseResult runDispense() {
+  DispenseResult result;
+  result.reason = ABORT_NONE;
+  result.slotsCompleted = 0;
+  result.emptyPartIndex = -1;
+
+  // 0) Refuse to even start if a door is already open.
+  if (anyDoorOpenNow()) {
+    result.reason = ABORT_DOOR;
+    return result;
+  }
+
   // 1) Home the packing system first (motor energized on SRW bit 5).
   if (!packHome()) {
     packEnable(false);  // release on failure
-    return;
+    // Treat a homing failure like an empty/unable stop with 0 slots done.
+    result.reason = ABORT_EMPTY;
+    return result;
   }
 
   // 2) One kit per slot: move to slot N, dispense kit N.
   for (int kit = 1; kit <= numKits; kit++) {
+    // Door check before moving to / filling the next slot.
+    if (anyDoorOpenNow()) {
+      result.reason = ABORT_DOOR;
+      break;
+    }
+
     packMoveToSlot(kit);  // slot 1 = home+offset, then +pitch each time
-    dispenseOneKit();     // packing motor held energized throughout
+
+    if (!dispenseOneKit(result)) {
+      // dispenseOneKit set result.reason (and emptyPartIndex if empty).
+      // This slot was NOT completed; slotsCompleted stays at the prior count.
+      break;
+    }
+
+    // Slot fully dispensed.
+    result.slotsCompleted = kit;
   }
 
-  // 3) All kits done — now it is safe to release the packing motor.
+  // 3) Run finished (or aborted) — release the packing motor.
   packEnable(false);
+  return result;
 }
 
 // =================================================================
@@ -1158,9 +1253,52 @@ void showWarningPopup(const char* message) {
   drawCenteredText(popupX + 10, popupY + 10, POPUP_W - 20, POPUP_H - 20, message, RA8875_BLACK, RA8875_WHITE, 1);
   drawCenteredText(popupCloseX, popupCloseY, POPUP_CLOSE_SIZE, POPUP_CLOSE_SIZE, "X", COLOR_RED, RA8875_WHITE, 1);
 }
+
+// Two-line variant so the abort messages can name the reason and the slot
+// count on separate lines within the same popup box.
+void showWarningPopupTwoLine(const char* line1, const char* line2) {
+  popupVisible = true;
+  tft.fillRect(popupX, popupY, POPUP_W, POPUP_H, RA8875_WHITE);
+  tft.drawRect(popupX, popupY, POPUP_W, POPUP_H, RA8875_BLACK);
+  int lineHeight = 16 * (1 + 1);
+  int lineGap = 12;
+  int blockH = lineHeight * 2 + lineGap;
+  int startY = popupY + (POPUP_H - blockH) / 2;
+  drawCenteredText(popupX + 10, startY, POPUP_W - 20, lineHeight, line1, RA8875_BLACK, RA8875_WHITE, 1);
+  drawCenteredText(popupX + 10, startY + lineHeight + lineGap, POPUP_W - 20, lineHeight, line2, RA8875_BLACK, RA8875_WHITE, 1);
+  drawCenteredText(popupCloseX, popupCloseY, POPUP_CLOSE_SIZE, POPUP_CLOSE_SIZE, "X", COLOR_RED, RA8875_WHITE, 1);
+}
+
 void closeWarningPopup() {
   popupVisible = false;
   drawInterface();
+}
+
+// Build and show the correct popup for a completed / aborted dispense run.
+void showDispenseResultPopup(const DispenseResult& r) {
+  char line2[40];
+  switch (r.reason) {
+    case ABORT_NONE:
+      showWarningPopup("Dispensing complete!");
+      break;
+
+    case ABORT_EMPTY: {
+      // e.g. "Out of Capacitor 2"
+      char line1[40];
+      if (r.emptyPartIndex >= 0)
+        snprintf(line1, sizeof(line1), "Stopped: out of %s", parts[r.emptyPartIndex]);
+      else
+        snprintf(line1, sizeof(line1), "Stopped: dispenser empty");
+      snprintf(line2, sizeof(line2), "Slots filled: %d", r.slotsCompleted);
+      showWarningPopupTwoLine(line1, line2);
+      break;
+    }
+
+    case ABORT_DOOR:
+      snprintf(line2, sizeof(line2), "Slots filled: %d", r.slotsCompleted);
+      showWarningPopupTwoLine("Stopped: door opened", line2);
+      break;
+  }
 }
 
 // =================================================================
@@ -1393,12 +1531,12 @@ void loop() {
       return;
     }
     showDispensingPopup();
-    runDispense();
+    DispenseResult result = runDispense();
     dispensing = false;
     // Ignore the touch that is still held after the (long) batch:
     while (tft.touched()) { tft.touchRead(&rawX, &rawY); }  // wait for release
     lastTouchTime = millis();                               // reset debounce
-    showWarningPopup("Dispensing complete!");
+    showDispenseResultPopup(result);
     return;
   }
 }
