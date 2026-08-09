@@ -19,12 +19,20 @@
 //    every kit is dispensed. # of Kits (1..10) = slots to fill.
 //
 //  Mid-run aborts:
-//    * If a resistor/capacitor dispenser runs out (a feed fails ->
-//      FLAG_REMOVE), the whole run stops immediately. The popup reports
-//      how many slots were completed and which dispenser ran empty.
+//    * If a resistor/capacitor dispenser runs out (a feed fails), the
+//      whole run stops immediately. The popup reports how many slots were
+//      completed and which dispenser ran empty.
 //    * If either door opens mid-run, the run stops immediately and the
 //      popup reports how many slots were completed. Doors are checked
 //      before each kit and before each part within a kit.
+//
+//  Resistor LOADED behavior:
+//    A resistor slot stays FLAG_LOADED after a normal dispense, and stays
+//    LOADED even if a mid-run feed comes up short (the run aborts, but the
+//    slot is not marked REMOVE). It only becomes FLAG_REMOVE ("UNABLE TO
+//    LOAD") when the operator presses Load and resLoad() actually fails to
+//    find stock. The idle sensor poll will not knock a LOADED resistor slot
+//    back to EMPTY.
 //
 //  UI mapping:
 //    Dispense page:  each +/- box sets a per-slot quantity.
@@ -724,6 +732,11 @@ bool resFeedOne(int s) {
   return true;
 }
 
+// Dispense `qty` resistors from slot s. Returns the number actually
+// dispensed. A short return (< qty) means a feed failed (out of stock),
+// but this routine deliberately does NOT touch dispenserFlag: the slot
+// stays LOADED. Only resLoad() ever sets FLAG_REMOVE, so the button holds
+// "LOADED" until the operator presses Load and that retry fails.
 int resDispense(int s, int qty) {
   if (qty <= 0) return 0;
   ResDispenser& d = res[s];
@@ -744,10 +757,7 @@ int resDispense(int s, int qty) {
     delay(5);
     int dispensed = 0;
     for (int i = 0; i < chunk; i++) {
-      if (!resFeedOne(s)) {
-        dispenserFlag[6 + s] = FLAG_REMOVE;
-        break;
-      }
+      if (!resFeedOne(s)) break;  // short feed -> out of stock; flag left untouched
       dispensed++;
     }
     stepMotor(d.dirPin, d.stepPin, -RES_BACKOFF_STEPS, 1, RES_FEED_DELAY_US);
@@ -860,8 +870,15 @@ void wireUpdateStock(int s) {
 }
 
 // Keep all load indicators synchronized with their sensors while the machine
-// is idle. FLAG_REMOVE is intentionally preserved until the operator retries;
-// normal EMPTY/LOADED states follow the current physical sensor state.
+// is idle.
+//
+//  * Capacitors: FLAG_REMOVE is preserved until the operator retries; normal
+//    EMPTY/LOADED states follow the current physical sensor state.
+//  * Resistors: a LOADED slot is HELD LOADED regardless of the sensor. A
+//    resistor slot only changes to FLAG_REMOVE via resLoad() failing, and
+//    only clears back toward EMPTY/LOADED once a load routine has run. This
+//    means an empty resistor spool keeps showing LOADED until the operator
+//    presses Load and that retry fails ("UNABLE TO LOAD").
 void updateLoadStatusFromSensors() {
   static unsigned long lastPollMs = 0;
   unsigned long now = millis();
@@ -898,16 +915,17 @@ void updateLoadStatusFromSensors() {
     }
 
     // Resistor sensor -> part indexes 6..8
+    // Keep the schmitt state fresh (needed for feed/load logic) but do NOT
+    // let the poll change the flag. Only allow the sensor to promote an
+    // EMPTY slot to LOADED (e.g. operator manually seats a strip); a LOADED
+    // slot is held LOADED, and REMOVE is held until a load retry runs.
     int resIndex = 6 + s;
     bool resPresent = schmitt(res[s].sensorPin, res[s].blocked,
                               res[s].hi, res[s].lo);
-    if (dispenserFlag[resIndex] != FLAG_REMOVE) {
-      DispenserFlag nextFlag = resPresent ? FLAG_LOADED : FLAG_EMPTY;
-      if (dispenserFlag[resIndex] != nextFlag) {
-        dispenserFlag[resIndex] = nextFlag;
-        if (currentPage == PAGE_RELOAD && !popupVisible) {
-          drawReloadButton(resIndex);
-        }
+    if (dispenserFlag[resIndex] == FLAG_EMPTY && resPresent) {
+      dispenserFlag[resIndex] = FLAG_LOADED;
+      if (currentPage == PAGE_RELOAD && !popupVisible) {
+        drawReloadButton(resIndex);
       }
     }
 
@@ -973,8 +991,8 @@ bool selectedDispensersReady() {
 // quantities[i] is the per-kit amount for that part.
 //
 // Aborts partway if a door opens or a resistor/capacitor dispenser runs
-// out of parts. On abort, `out` carries the reason (and, for ABORT_EMPTY,
-// the part index that ran empty) and dispensing stops immediately.
+// out of parts. Empty detection is by short-count (got < qty) so the
+// resistor slot's LOADED flag is left intact on an out-of-stock abort.
 // Returns true if the whole kit dispensed, false if it aborted.
 bool dispenseOneKit(DispenseResult& out) {
   for (int i = 0; i < NUM_PARTS; i++) {
@@ -998,7 +1016,9 @@ bool dispenseOneKit(DispenseResult& out) {
       }
     } else if (partType[i] == TYPE_RESISTOR) {
       int got = resDispense(s, qty);
-      if (got < qty || dispenserFlag[i] == FLAG_REMOVE) {
+      // Resistor empty is detected purely by short-count; the flag stays
+      // LOADED so the button holds "LOADED" until a Load retry fails.
+      if (got < qty) {
         out.reason = ABORT_EMPTY;
         out.emptyPartIndex = i;
         return false;
@@ -1463,6 +1483,12 @@ void loop() {
     for (int i = 0; i < NUM_PARTS; i++) {
       if (pointInRect(x, y, partReloadBtnX(i), partButtonY(i), RELOAD_BTN_W, RELOAD_BTN_H)) {
         if (partType[i] == TYPE_WIRE) {
+          reloadPart(i);
+        } else if (partType[i] == TYPE_RESISTOR) {
+          // Resistors: allow Load to run in any state (EMPTY / LOADED /
+          // REMOVE) so the operator can re-seat or advance a strip even
+          // when the slot already reads LOADED. resLoad() sets the
+          // resulting flag (LOADED on success, REMOVE on failure).
           reloadPart(i);
         } else if (dispenserFlag[i] == FLAG_EMPTY) {
           reloadPart(i);
