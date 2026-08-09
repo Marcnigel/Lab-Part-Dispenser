@@ -159,7 +159,7 @@ struct ResDispenser {
 ResDispenser res[3] = {
   // STEP DIR ENBIT  SENSOR HI   LO   CHA CHB
   { 44, 45, 3, A3, 900, 640, 0, 1, false, false },
-  { 46, 47, 4, A4, 900, 440, 2, 3, false, false },
+  { 46, 47, 4, A4, 900, 460, 2, 3, false, false },
   { 48, 49, 5, A5, 900, 580, 4, 5, false, false },
 };
 
@@ -619,6 +619,7 @@ int capDispenseBatch(int s, int count) {
   }
   if (fed > 0) {
     stepMotor(d.dirPin, d.stepPin, CAP_ADVANCE_STEPS, 1, CAP_FEED_DELAY_US);
+    delay(300);
     capCut(s);
   }
   return fed;
@@ -726,13 +727,17 @@ bool resFeedOne(int s) {
 int resDispense(int s, int qty) {
   if (qty <= 0) return 0;
   ResDispenser& d = res[s];
-  int target = qty;
+
   if (d.needExtra) {
-    target += 2;
+    enRC(d.enBit, true);
+    delay(10);
+    resFeedOne(s);          // advance slack, no cut
+    resFeedOne(s);
+    enRC(d.enBit, false);
     d.needExtra = false;
   }
 
-  int totalDispensed = 0, remaining = target;
+  int totalDispensed = 0, remaining = qty;
   while (remaining > 0) {
     int chunk = (remaining > RES_MAX_PER_CUT) ? RES_MAX_PER_CUT : remaining;
     enRC(d.enBit, true);

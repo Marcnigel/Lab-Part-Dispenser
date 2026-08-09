@@ -5,7 +5,7 @@
 //  - Type "end" in serial monitor to stop and print the total
 // ================================================================
 
-#define SENSOR_PIN   A8
+#define SENSOR_PIN   A4
 #define SENSOR_HI    950   // rise above this → BLOCKED
 #define SENSOR_LO    350   // fall below this → CLEAR
 
